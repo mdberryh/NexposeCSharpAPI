@@ -1,0 +1,222 @@
+void Main()
+{
+	//api guid: https://community.rapid7.com/docs/DOC-1896
+	string pw = "";
+	//Server  PORT  accessUser accessUser'sPW UserToModify NewPassword
+	var nexpose = new Nexpose("servername or IP", "port", "adminUser", pw);
+	nexpose.GetUserId("dummyuser").Dump();
+	nexpose.Disconnect();
+//	nexpose.Connect();
+}
+
+// Define other methods and classes here
+public class Nexpose{
+
+	private string apiVersion = "api/1.1/xml";
+	private string url;
+    private string sessionId {get;set;}
+	
+	public Nexpose(string nexposeServer, string port, string username, string password){
+		//since we were given all the paramenters call Connect...
+		Connect(nexposeServer, username,password, port);
+	}
+	public Nexpose(){
+	}
+	public bool Connect(string nexposeServer, string username, string password, string port){
+		
+		this.url = "https://"+nexposeServer+":"+port+"/"+apiVersion;
+		
+		//Create XML for the login response
+		string xml = nexposeLoginXML(username,password);
+		string response = sendXMLHTTP(xml);
+		
+		if(response == null){
+			return false;
+		}
+		
+		var loginResonseXml = XDocument.Parse(response);
+		//set session ID
+		sessionId = attributeValue(loginResonseXml.Element("LoginResponse"),"session-id");
+		if(sessionId != "" && sessionId != null){
+			return true;
+		}
+		return false;
+	}
+
+	
+	public bool Disconnect(){
+		//create XML request
+		var req = genericNexposeXMLRequest("LogoutRequest","session-id",sessionId);
+		
+		string response = sendXMLHTTP(req);
+		
+		if(response == null){
+			return false;
+		}
+		
+		var outResonseXml = XDocument.Parse(response);
+		this.sessionId = "";
+		return true;
+	}
+	
+	public List<XElement> ListUsers(){
+		var userList = XDocument.Parse(sendXMLHTTP(genericNexposeXMLRequest("UserListingRequest","session-id", sessionId)));
+		var users= userList.Elements("UserListingResponse").Elements();
+		return users.ToList();
+	}
+	
+	public string ChangeUserPassword(string username, string newPassword){
+		var userID = GetUserId(username);
+		var userDetails = GetUserDetails(userID);
+		
+		
+		string roleName = attributeValue(userDetails.Elements("UserConfig").ElementAt(0),"role-name");
+		string authsrcid = attributeValue(userDetails.Elements("UserConfig").ElementAt(0),"authsrcid");
+		string name = attributeValue(userDetails.Elements("UserConfig").ElementAt(0),"name");
+		string fullname = attributeValue(userDetails.Elements("UserConfig").ElementAt(0),"fullname");
+		
+		var xml =  NexposeUserSaveRequest(sessionID,Convert.ToInt32( userIdNumber),roleName,authsrcid,name,fullname, newPassword);
+		return sendXMLHTTP(xml);
+		
+	}
+
+	private string NexposeUserSaveRequest(string sessionID, string userId,string rolename, string authcid, string name,string fullname, string pw){
+		XDocument doc = new XDocument(
+			///new XDeclaration("1.0", "utf-8", null),
+			new XElement( "UserSaveRequest", 
+				new XAttribute("session-id",sessionID),
+				new XElement("UserConfig", 
+					new XAttribute("id",userId),
+					new XAttribute("role-name",rolename),
+					new XAttribute("authsrcid",authcid),
+					new XAttribute("password", pw),
+					new XAttribute("fullname", fullname),
+					new XAttribute("enabled", "1"),
+					new XAttribute("name",name))
+			)
+		);
+		var sb = new StringBuilder();
+		var wr = new ExtentedStringWriter(sb, Encoding.UTF8);
+		doc.Dump();
+		return doc.ToString();
+	}
+
+
+
+	public XElement GetUserDetails(string userId){
+		var xml = NexposeUserConfigRequest(sessionId,userId);
+		var UserConfigResponse = XDocument.Parse(sendXMLHTTP(x));
+		var temp = UserConfigResponse.Elements("UserConfigResponse").ElementAt(0);
+		return temp;
+		
+	
+		return null;
+	}
+	
+	public string GetUserId(string username){
+		var users = ListUsers();
+		var foundUser= users.FirstOrDefault (u => u.Attribute("userName").Value == username);
+		return foundUser.Attribute("id").Value;
+	}
+	
+	private string nexposeLoginXML(string username, string pw){
+		XDocument doc = new XDocument(
+			///new XDeclaration("1.0", "utf-8", null),
+			new XElement( "LoginRequest", 
+				new XAttribute("user-id",username), 
+				new XAttribute("password",pw.ToString()))
+			);
+			var sb = new StringBuilder();
+		var wr = new ExtentedStringWriter(sb, Encoding.UTF8);
+		return doc.ToString();
+	}
+	
+	private string NexposeUserConfigRequest(string sessionID, string userid){
+		XDocument doc = new XDocument(
+			///new XDeclaration("1.0", "utf-8", null),
+			new XElement( "UserConfigRequest", new XAttribute("session-id",sessionID), new XAttribute("id",userid))
+		);
+		var sb = new StringBuilder();
+		var wr = new ExtentedStringWriter(sb, Encoding.UTF8);
+	
+		return doc.ToString();
+	}
+
+	
+	//most nexpose requests just need one xml element with an attribute for the session id...
+	// it would be nice to make this a bit more generic with variable function parameters....
+	private string genericNexposeXMLRequest(string elementName, string attributeName, string attributeValue){
+		XDocument doc = new XDocument(
+			///new XDeclaration("1.0", "utf-8", null),
+			new XElement( elementName, 
+				new XAttribute(attributeName,attributeValue))
+			);
+			var sb = new StringBuilder();
+		var wr = new ExtentedStringWriter(sb, Encoding.UTF8);
+		return doc.ToString();
+	}
+	
+	private string  sendXMLHTTP(string xml)
+	{
+    	HttpWebRequest request = (HttpWebRequest)WebRequest.Create(this.url);
+    	byte[] bytes;
+    	bytes = System.Text.Encoding.ASCII.GetBytes(xml);
+    	request.ContentType = "text/xml; encoding='utf-8'";
+    	request.ContentLength = bytes.Length;
+    	request.Method = "POST";
+	
+		//the cert is a self cert so is not valid on clients....
+		request.ServerCertificateValidationCallback = new RemoteCertificateValidationCallback
+			(delegate { return true; });
+    	Stream requestStream = request.GetRequestStream();
+    	requestStream.Write(bytes, 0, bytes.Length);
+    	requestStream.Close();
+    	HttpWebResponse response;
+    	response = (HttpWebResponse)request.GetResponse();
+    	if (response.StatusCode == HttpStatusCode.OK)
+    	{
+        	Stream responseStream = response.GetResponseStream();
+			//XmlDocument xDoc = new XmlDocument();
+			//XmlTextReader myXmlReader = new XmlTextReader(responseStream);
+			//xDoc.Load(myXmlReader);
+			//return xDoc;
+        	string responseStr = new StreamReader(responseStream).ReadToEnd();
+        	return responseStr;
+    	}
+    	return null;
+	}
+
+	// retrieve attribute by name
+	// https://stackoverflow.com/questions/20031852/parse-xml-string-using-c-sharp
+	private string attributeValue(XElement item, string attributeName)
+	{
+    	var attribute = item.Attribute(attributeName);
+    	return attribute != null ? attribute.Value : string.Empty;
+	}
+	// retrieve a single element by tag name
+	// https://stackoverflow.com/questions/20031852/parse-xml-string-using-c-sharp
+	private XElement getElement(XDocument xmlDocument, string elementName)
+	{
+    	var element = xmlDocument.Descendants("items").Elements().Where (x => x.Name == elementName).FirstOrDefault();
+    	return element != null ? element : null;
+	}
+	//https://blog.jsinh.in/use-utf-8-encoding-for-stringwriter-in-c/#.WS24AVUrKHs
+   	public sealed class ExtentedStringWriter : StringWriter
+    {
+        private readonly Encoding stringWriterEncoding;
+        public ExtentedStringWriter(StringBuilder builder, Encoding desiredEncoding)
+            : base(builder)
+        {
+            this.stringWriterEncoding = desiredEncoding;
+        }
+
+        public override Encoding Encoding
+        {
+            get
+            {
+                return this.stringWriterEncoding;
+            }
+        }
+    }
+
+}
